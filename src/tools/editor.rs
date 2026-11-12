@@ -472,6 +472,11 @@ mod tests {
         let (loaded, error) = file.load();
         assert!(error.is_none());
         assert_eq!(loaded.categories[0].tools[0].id, id);
+        // A settings fallback must still publish the saved favorite and notify the user.
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
+        config["settings"]["theme"] = "invalid".into();
+        std::fs::write(file.path(), serde_json::to_vec(&config).unwrap()).unwrap();
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             assert!(window.try_find("dialog-save").is_none());
@@ -493,6 +498,7 @@ mod tests {
         store.read_with(cx, |store, _| assert_eq!(store.catalog.home[0].id, id));
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
+            assert!(!crate::ui::notifications::current(window, cx).is_empty());
             window.right_click(gpui_kit::SharedString::from(format!("tool-{id}")), cx);
         })
         .unwrap();

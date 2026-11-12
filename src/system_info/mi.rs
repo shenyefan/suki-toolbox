@@ -11,6 +11,7 @@ type Result<T> = std::result::Result<T, String>;
 
 pub(super) enum Value {
     Text(String),
+    Boolean(bool),
     Number(u64),
     Numbers(Vec<u64>),
 }
@@ -18,6 +19,17 @@ pub(super) enum Value {
 pub(super) struct Record(BTreeMap<&'static str, Value>);
 
 impl Record {
+    pub(super) fn first_text(&self, fields: &[&str]) -> Option<String> {
+        fields.iter().find_map(|field| self.text(field))
+    }
+
+    pub(super) fn boolean(&self, name: &str) -> Option<bool> {
+        match self.0.get(name)? {
+            Value::Boolean(value) => Some(*value),
+            _ => None,
+        }
+    }
+
     pub(super) fn text(&self, name: &str) -> Option<String> {
         match self.0.get(name)? {
             Value::Text(value) => Some(value.clone()),
@@ -275,6 +287,7 @@ unsafe fn element(instance: *const MI_Instance, name: &str) -> Result<Option<Val
             return Ok(None);
         }
         let value = match kind {
+            MI_BOOLEAN => Value::Boolean(value.boolean != 0),
             MI_STRING => {
                 let text = read_string(value.string).trim().to_owned();
                 if text.is_empty() {
@@ -410,5 +423,37 @@ impl Drop for Operation {
                 close(&mut self.handle);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_use_the_first_available_property_and_allow_all_to_be_absent() {
+        let mut record = Record(BTreeMap::from([
+            ("Caption", Value::Text("备用名称".into())),
+            ("Description", Value::Text("设备描述".into())),
+        ]));
+        assert_eq!(
+            record
+                .first_text(&["Name", "Caption", "Description"])
+                .as_deref(),
+            Some("备用名称")
+        );
+        record.0.remove("Caption");
+        assert_eq!(
+            record
+                .first_text(&["Name", "Caption", "Description"])
+                .as_deref(),
+            Some("设备描述")
+        );
+        record.0.clear();
+        assert!(
+            record
+                .first_text(&["Name", "Caption", "Description"])
+                .is_none()
+        );
     }
 }

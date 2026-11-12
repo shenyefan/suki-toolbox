@@ -1,7 +1,7 @@
 //! Appearance preferences persisted in the executable directory's config.json.
 use gpui_kit::{App, Global};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) mod view;
 
@@ -91,15 +91,34 @@ pub(crate) fn load() -> (Preferences, Option<String>) {
             Some("无法定位程序目录，设置不会保存".into()),
         );
     };
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return (Preferences::default(), None);
+    load_from(&path)
+}
+
+fn load_from(path: &Path) -> (Preferences, Option<String>) {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (Preferences::default(), None);
+        }
+        Err(error) => {
+            return (
+                Preferences::default(),
+                Some(format!(
+                    "设置读取失败，已使用默认设置：{}（{error}）",
+                    path.display()
+                )),
+            );
+        }
     };
     let value = match serde_json::from_str::<serde_json::Value>(&raw) {
         Ok(value) => value,
         Err(error) => {
             return (
                 Preferences::default(),
-                Some(format!("设置文件无法读取：{}（{error}）", path.display())),
+                Some(format!(
+                    "设置读取失败，已使用默认设置：{}（{error}）",
+                    path.display()
+                )),
             );
         }
     };
@@ -113,7 +132,10 @@ pub(crate) fn load() -> (Preferences, Option<String>) {
         Ok(None) => (Preferences::default(), None),
         Err(error) => (
             Preferences::default(),
-            Some(format!("设置文件无法读取：{}（{error}）", path.display())),
+            Some(format!(
+                "设置读取失败，已使用默认设置：{}（{error}）",
+                path.display()
+            )),
         ),
     }
 }
@@ -161,8 +183,23 @@ mod tests {
 
     #[test]
     fn damaged_files_report_instead_of_falling_back_silently() {
-        let error = serde_json::from_str::<Preferences>("broken settings").unwrap_err();
-        assert!(!error.to_string().is_empty());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        for raw in ["{broken", r#"{"settings":{"theme":"invalid"}}"#] {
+            std::fs::write(&path, raw).unwrap();
+            let (preferences, error) = super::load_from(&path);
+            assert_eq!(preferences, Preferences::default());
+            let error = error.unwrap();
+            assert!(error.contains("已使用默认设置"));
+            assert!(error.contains(path.to_str().unwrap()));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+        let (preferences, error) = super::load_from(root.path());
+        assert_eq!(preferences, Preferences::default());
+        assert!(error.unwrap().contains("已使用默认设置"));
+        let (preferences, error) = super::load_from(&root.path().join("missing.json"));
+        assert_eq!(preferences, Preferences::default());
+        assert!(error.is_none());
     }
     #[test]
     fn activation_mode_preserves_keyboard_and_does_not_launch_twice() {

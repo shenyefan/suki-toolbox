@@ -27,12 +27,38 @@ impl HardwareKind {
     }
 }
 
-pub(super) struct HardwareRow {
-    pub(super) kind: HardwareKind,
-    pub(super) devices: Vec<String>,
+#[derive(Clone)]
+pub(super) struct HardwareDevice {
+    pub(super) id: uuid::Uuid,
+    pub(super) text: String,
+    /// None means the system did not provide a reliable type classification.
+    pub(super) virtual_device: Option<bool>,
+    pub(super) primary: bool,
 }
 
-#[derive(Default)]
+impl HardwareDevice {
+    pub(super) fn new(text: String, virtual_device: Option<bool>) -> Self {
+        Self {
+            // Identity lasts for the snapshot, including sorting and rerenders.
+            id: uuid::Uuid::new_v4(),
+            text: if text.is_empty() {
+                "未知设备".into()
+            } else {
+                text
+            },
+            virtual_device,
+            primary: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct HardwareRow {
+    pub(super) kind: HardwareKind,
+    pub(super) devices: Vec<HardwareDevice>,
+}
+
+#[derive(Clone, Default)]
 pub(super) struct Snapshot {
     pub(super) model: String,
     pub(super) os: String,
@@ -68,20 +94,31 @@ impl Snapshot {
             if row.devices.is_empty() {
                 lines.push("  未知".into());
             } else {
-                lines.extend(row.devices.iter().map(|device| format!("  {device}")));
+                lines.extend(row.devices.iter().map(|device| {
+                    format!(
+                        "  {}{}{}",
+                        if device.primary { "主屏 " } else { "" },
+                        device.text,
+                        if device.virtual_device == Some(true) {
+                            "（虚拟设备）"
+                        } else {
+                            ""
+                        },
+                    )
+                }));
             }
         }
         lines.join("\n")
     }
 
-    pub(super) fn add(&mut self, kind: HardwareKind, devices: Vec<String>) {
-        self.rows.push(HardwareRow {
-            kind,
-            devices: devices
-                .into_iter()
-                .filter(|value| !value.is_empty())
-                .collect(),
+    pub(super) fn add(&mut self, kind: HardwareKind, mut devices: Vec<HardwareDevice>) {
+        // Stable ordering preserves the provider's order within each type.
+        devices.sort_by_key(|device| match device.virtual_device {
+            Some(false) => 0,
+            None => 1,
+            Some(true) => 2,
         });
+        self.rows.push(HardwareRow { kind, devices });
     }
 }
 
@@ -126,6 +163,61 @@ pub(super) fn format_uptime(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_category_orders_physical_unknown_and_virtual_devices_stably() {
+        for kind in [
+            HardwareKind::Mainboard,
+            HardwareKind::Processor,
+            HardwareKind::Memory,
+            HardwareKind::Graphics,
+            HardwareKind::Monitor,
+            HardwareKind::Disk,
+            HardwareKind::Battery,
+            HardwareKind::Audio,
+            HardwareKind::Network,
+        ] {
+            let mut snapshot = Snapshot::default();
+            let mut primary = HardwareDevice::new("虚拟主屏".into(), Some(true));
+            primary.primary = true;
+            let primary_id = primary.id;
+            snapshot.add(
+                kind,
+                vec![
+                    primary,
+                    HardwareDevice::new("未确认一".into(), None),
+                    HardwareDevice::new("物理一".into(), Some(false)),
+                    HardwareDevice::new("虚拟二".into(), Some(true)),
+                    HardwareDevice::new("物理二".into(), Some(false)),
+                    HardwareDevice::new("未确认二".into(), None),
+                ],
+            );
+            let devices = &snapshot.rows[0].devices;
+            assert_eq!(
+                devices
+                    .iter()
+                    .map(|device| device.text.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "物理一",
+                    "物理二",
+                    "未确认一",
+                    "未确认二",
+                    "虚拟主屏",
+                    "虚拟二"
+                ],
+            );
+            assert_eq!(devices[4].id, primary_id);
+            assert!(devices[4].primary);
+            let copied = snapshot.copy_text(0);
+            assert!(copied.contains("  主屏 虚拟主屏（虚拟设备）"));
+            assert!(copied.find("物理一").unwrap() < copied.find("虚拟主屏").unwrap());
+            assert!(!copied.contains("未确认一（虚拟设备）"));
+            snapshot.add(kind, vec![HardwareDevice::new(String::new(), None)]);
+            assert_eq!(snapshot.rows[1].devices.len(), 1);
+            assert_eq!(snapshot.rows[1].devices[0].text, "未知设备");
+        }
+    }
 
     #[test]
     fn smbios_types_use_decimal_codes() {

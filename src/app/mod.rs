@@ -19,6 +19,7 @@ actions!(toolbox, [Quit, ToggleSidebar]);
 
 mod navigation;
 use navigation::Page;
+use std::sync::{Arc, LazyLock};
 
 pub(crate) struct ToolboxApp {
     page: Page,
@@ -232,6 +233,12 @@ impl ToolboxApp {
     }
 
     fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        static LOGO: LazyLock<Arc<Image>> = LazyLock::new(|| {
+            Arc::new(Image::from_bytes(
+                ImageFormat::Svg,
+                include_bytes!("../../assets/logo-mark.svg").to_vec(),
+            ))
+        });
         let motion = cx.theme().motion_tokens();
         let expanded = base::motion::transition(
             "sidebar-expanded",
@@ -287,7 +294,7 @@ impl ToolboxApp {
                                 "收起侧栏"
                             })
                             .tooltip("切换侧栏 · Ctrl+B")
-                            .child(ui::branding::sidebar_logo().size_full())
+                            .child(img(LOGO.clone()).size_full())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.collapsed = !this.collapsed;
                                 cx.notify();
@@ -459,7 +466,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn missing_config_starts_on_system_info_even_with_generated_favorites(cx: &mut TestAppContext) {
+    fn missing_config_starts_on_system_info_even_with_supplied_favorites(cx: &mut TestAppContext) {
         let handle = open_catalog(cx, catalog(), true);
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);

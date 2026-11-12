@@ -162,12 +162,15 @@ impl CatalogStore {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.saving = false;
                 match result {
-                    Ok(()) => {
+                    Ok(warning) => {
                         this.catalog = next;
                         this.load_icons(window, cx);
                         if close_dialog {
                             use gpui_kit::component::WindowExt as _;
                             window.close_dialog(cx);
+                        }
+                        if let Some(warning) = warning {
+                            ui::show_error(warning, window, cx);
                         }
                     }
                     Err(error) => ui::show_error(format!("工具配置保存失败：{error}"), window, cx),

@@ -32,6 +32,7 @@ pub(crate) mod text {
 pub(crate) mod layout {
     use super::*;
     pub(crate) const SYSTEM_INFO_LABEL_WIDTH: Rems = rems(7.);
+    pub(crate) const SYSTEM_INFO_MARKERS_WIDTH: Rems = rems(2.5);
     pub(crate) const SYSTEM_INFO_SUMMARY_ICON: Rems = rems(3.);
     pub(crate) const ICON_PICKER_WIDTH: Rems = rems(22.);
     pub(crate) const ICON_PICKER_HEIGHT: Rems = rems(15.);
@@ -48,7 +49,6 @@ pub(crate) mod layout {
     pub(crate) const NAV_ITEM_HEIGHT: Rems = rems(2.5);
     pub(crate) const TITLE_HEIGHT: Rems = rems(3.5);
     pub(crate) const BRAND_LOGO_SIZE: Rems = rems(1.75);
-    pub(crate) const ABOUT_LOGO_SIZE: Rems = rems(3.);
     pub(crate) const BRAND_HEIGHT: Rems = rems(4.);
     pub(crate) const EMPTY_STATE_HEIGHT: Rems = rems(18.);
     pub(crate) const SELECT_WIDTH: Rems = rems(10.);
@@ -77,6 +77,23 @@ pub(crate) mod control {
 pub(crate) mod preferences {
     use super::*;
     pub(crate) const ROW_HEIGHT: Rems = rems(3.);
+}
+
+/// Export at twice the logical resolution for readable text and icons in PNG.
+pub(crate) mod system_info_export {
+    use gpui_kit::{
+        App,
+        component::{ActiveTheme, Theme},
+    };
+
+    pub(crate) const SCALE: f32 = 2.;
+    pub(crate) const WIDTH: i32 = 1800;
+
+    pub(crate) fn solid_theme(cx: &App) -> Theme {
+        let mut theme = cx.theme().clone();
+        super::apply(&mut theme, false);
+        theme
+    }
 }
 
 pub(crate) mod window {

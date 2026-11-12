@@ -200,19 +200,20 @@ impl ConfigFile {
     /// Generate without replacing an existing configuration, including one created
     /// after the caller checked `exists`.
     pub(crate) fn save_new(&self, catalog: &Catalog) -> io::Result<()> {
-        self.write(catalog, true)
+        self.write(catalog, true).map(|_| ())
     }
 
-    pub(crate) fn save(&self, catalog: &Catalog) -> io::Result<()> {
+    pub(crate) fn save(&self, catalog: &Catalog) -> io::Result<Option<String>> {
         self.write(catalog, false)
     }
 
-    fn write(&self, catalog: &Catalog, new: bool) -> io::Result<()> {
+    fn write(&self, catalog: &Catalog, new: bool) -> io::Result<Option<String>> {
         let mut catalog = catalog.clone();
         self.prepare(&mut catalog)?;
         catalog.refresh_home();
+        let (settings, warning) = read_settings(&self.path);
         let config = ConfigRoot {
-            settings: read_settings(&self.path).unwrap_or_default(),
+            settings,
             favorite_order: catalog.favorite_order.clone(),
             categories: catalog
                 .categories
@@ -252,7 +253,8 @@ impl ConfigFile {
             .create(!new)
             .truncate(!new)
             .open(self.path())?;
-        file.write_all(&bytes)
+        file.write_all(&bytes)?;
+        Ok(warning)
     }
 
     /// Normalize stored paths and validate component-library icon names.
@@ -344,11 +346,26 @@ impl ConfigFile {
     }
 }
 
-fn read_settings(path: &Path) -> Option<ConfigSettings> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<ConfigRoot>(&raw)
-        .ok()
-        .map(|root| root.settings)
+fn read_settings(path: &Path) -> (ConfigSettings, Option<String>) {
+    let result = match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str::<ConfigRoot>(&raw)
+            .map(|root| root.settings)
+            .map_err(io::Error::from),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return (ConfigSettings::default(), None);
+        }
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(settings) => (settings, None),
+        Err(error) => (
+            ConfigSettings::default(),
+            Some(format!(
+                "设置读取失败，已使用默认设置：{}（{error}）",
+                path.display()
+            )),
+        ),
+    }
 }
 
 /// Only a missing configuration permits scanning the tools directory.
@@ -451,7 +468,6 @@ fn scan(root: &Path) -> Catalog {
                         description: String::new(),
                         name,
                         exe: Some(exe),
-                        favorite: tools.is_empty(),
                         ..Default::default()
                     });
                 }
@@ -470,14 +486,8 @@ fn scan(root: &Path) -> Catalog {
             tools,
         });
     }
-    let home = categories
-        .iter()
-        .filter_map(|category| category.tools.first())
-        .cloned()
-        .collect();
     Catalog {
         categories,
-        home,
         ..Default::default()
     }
 }
@@ -605,6 +615,43 @@ mod tests {
         assert_eq!(
             picked.components().count(),
             tool_dir.components().count() + 1
+        );
+    }
+
+    #[test]
+    fn generated_catalog_starts_without_favorites() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [
+            "tools/CPU/One/run.exe",
+            "tools/CPU/Two/run.exe",
+            "tools/GPU/Three/run.exe",
+        ] {
+            write(&root.path().join(path), b"exe");
+        }
+        let file = ConfigFile::in_directory(root.path());
+        for _ in 0..2 {
+            let (catalog, error) = file.load();
+            assert!(error.is_none(), "{error:?}");
+            assert_eq!(catalog.categories.len(), 2);
+            assert!(catalog.home.is_empty());
+            assert!(catalog.favorite_order.is_empty());
+            assert!(
+                catalog
+                    .categories
+                    .iter()
+                    .flat_map(|category| &category.tools)
+                    .all(|tool| !tool.favorite)
+            );
+        }
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(file.path()).unwrap()).unwrap();
+        assert!(raw["favorite_order"].as_array().unwrap().is_empty());
+        assert!(
+            raw["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["favorite"] == false)
         );
     }
 
@@ -777,6 +824,37 @@ mod tests {
         );
         assert!(super::library_icon("icons/image.png").is_none());
         assert!(super::library_icon("UnknownIcon").is_none());
+    }
+
+    #[test]
+    fn saving_catalog_reports_settings_fallback_and_preserves_valid_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let file = ConfigFile::in_directory(root.path());
+        let catalog = super::Catalog::default();
+        assert!(file.save(&catalog).unwrap().is_none());
+        for raw in [
+            "{broken",
+            r#"{"categories":[],"tools":[],"settings":{"theme":"invalid"}}"#,
+        ] {
+            write(file.path(), raw.as_bytes());
+            let warning = file.save(&catalog).unwrap().unwrap();
+            assert!(warning.contains("已使用默认设置"));
+            assert!(warning.contains(file.path().to_str().unwrap()));
+            let saved: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(file.path()).unwrap()).unwrap();
+            assert_eq!(saved["settings"]["theme"], "dark");
+            assert_eq!(saved["settings"]["backdrop"], "acrylic");
+            assert_eq!(saved["settings"]["open_mode"], "double");
+        }
+        write(
+            file.path(),
+            br#"{"categories":[],"tools":[],"settings":{"theme":"light"}}"#,
+        );
+        assert!(file.save(&catalog).unwrap().is_none());
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(file.path()).unwrap()).unwrap();
+        assert_eq!(saved["settings"]["theme"], "light");
+        assert_eq!(saved["settings"]["open_mode"], "double");
     }
 
     #[test]

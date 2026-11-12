@@ -1,3 +1,4 @@
+mod export;
 mod mi;
 mod model;
 mod windows;
@@ -11,11 +12,32 @@ use gpui_kit::{
     assets::IconName,
     base::TestSupportExt as _,
     component::{
-        ActiveTheme, Disableable, Icon, Sizable, button::Button, h_flex, scroll::ScrollableElement,
+        ActiveTheme, Disableable, Icon, Sizable,
+        button::{Button, DropdownButton},
+        h_flex,
+        scroll::ScrollableElement,
+        tooltip::Tooltip,
         v_flex,
     },
+    prelude::FluentBuilder as _,
     *,
 };
+
+actions!(system_information, [SaveScreenshot]);
+
+fn hardware_icon(kind: HardwareKind) -> IconName {
+    match kind {
+        HardwareKind::Mainboard => IconName::CircuitBoard,
+        HardwareKind::Processor => IconName::Cpu,
+        HardwareKind::Memory => IconName::MemoryStick,
+        HardwareKind::Graphics => IconName::Gpu,
+        HardwareKind::Monitor => IconName::Monitor,
+        HardwareKind::Disk => IconName::HardDrive,
+        HardwareKind::Battery => IconName::Battery,
+        HardwareKind::Audio => IconName::AudioLines,
+        HardwareKind::Network => IconName::Network,
+    }
+}
 use std::{
     sync::{
         Arc,
@@ -30,6 +52,8 @@ pub(crate) struct SystemInfoPage {
     request: u64,
     cancelled: Arc<AtomicBool>,
     task: Option<Task<()>>,
+    export_task: Option<Task<()>>,
+    exporting: bool,
     _uptime_task: Task<()>,
     uptime: u64,
 }
@@ -56,6 +80,8 @@ impl SystemInfoPage {
             request: 0,
             cancelled: Arc::new(AtomicBool::new(false)),
             task: None,
+            export_task: None,
+            exporting: false,
             _uptime_task: uptime_task,
             uptime: windows::uptime(),
         };
@@ -93,6 +119,60 @@ impl SystemInfoPage {
         cx.notify();
     }
 
+    fn screenshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.exporting || self.loading || self.snapshot.rows.is_empty() {
+            return;
+        }
+        let mut directory = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                ui::show_error(format!("无法获取截图保存目录：{error}"), window, cx);
+                return;
+            }
+        };
+        directory.pop();
+        let destination = cx.prompt_for_new_path(&directory, Some("SukiToolbox-system-info.png"));
+        let snapshot = self.snapshot.clone();
+        let uptime = self.uptime;
+        let appearance = export::Appearance::current(cx);
+        let svg_renderer = cx.svg_renderer();
+        self.exporting = true;
+        self.export_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = match destination.await {
+                Ok(Ok(Some(path))) => {
+                    cx.background_spawn(async move {
+                        let png =
+                            export::screenshot(&snapshot, uptime, &appearance, &svg_renderer)?;
+                        std::fs::write(&path, png).map_err(|error| {
+                            format!("截图导出失败（{}）：{error}", path.display())
+                        })?;
+                        Ok(Some(path))
+                    })
+                    .await
+                }
+                Ok(Ok(None)) => Ok(None),
+                Ok(Err(error)) => Err(format!("无法选择截图保存路径：{error}")),
+                Err(error) => Err(format!("无法选择截图保存路径：{error}")),
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.exporting = false;
+                match result {
+                    Ok(Some(_)) => {
+                        ui::notifications::push(
+                            window,
+                            component::notification::Notification::success("已导出系统信息截图"),
+                            cx,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => ui::show_error(error, window, cx),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
     fn hardware_row(&self, row: &HardwareRow, cx: &App) -> impl IntoElement {
         let id = match row.kind {
             HardwareKind::Mainboard => "system-info-mainboard",
@@ -105,23 +185,57 @@ impl SystemInfoPage {
             HardwareKind::Audio => "system-info-audio",
             HardwareKind::Network => "system-info-network",
         };
-        let icon = match row.kind {
-            HardwareKind::Mainboard => IconName::CircuitBoard,
-            HardwareKind::Processor => IconName::Cpu,
-            HardwareKind::Memory => IconName::MemoryStick,
-            HardwareKind::Graphics => IconName::Gpu,
-            HardwareKind::Monitor => IconName::Monitor,
-            HardwareKind::Disk => IconName::HardDrive,
-            HardwareKind::Battery => IconName::Battery,
-            HardwareKind::Audio => IconName::AudioLines,
-            HardwareKind::Network => IconName::Network,
-        };
+        let icon = hardware_icon(row.kind);
         let devices = if row.devices.is_empty() {
             v_flex().child(ui::muted("未知", cx))
         } else {
             v_flex()
                 .gap(space::XS)
-                .children(row.devices.iter().map(|value| div().child(value.clone())))
+                .children(row.devices.iter().map(|device| {
+                    let marker = |id, label: &'static str, icon| {
+                        h_flex()
+                            .id(id)
+                            .test_support()
+                            .role(Role::Image)
+                            .aria_label(label)
+                            .flex_shrink_0()
+                            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+                            .child(
+                                Icon::new(icon)
+                                    .size(layout::ICON)
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                    };
+                    h_flex()
+                        .id(SharedString::from(device.id.to_string()))
+                        .w_full()
+                        .min_w_0()
+                        .gap(space::SM)
+                        .child(div().flex_1().min_w_0().child(device.text.clone()))
+                        .child(
+                            h_flex()
+                                .id("system-info-markers")
+                                .test_support()
+                                .w(layout::SYSTEM_INFO_MARKERS_WIDTH)
+                                .flex_shrink_0()
+                                .justify_end()
+                                .gap(space::SM)
+                                .when(device.primary, |group| {
+                                    group.child(marker(
+                                        "system-info-primary",
+                                        "主屏",
+                                        IconName::MonitorCheck,
+                                    ))
+                                })
+                                .when(device.virtual_device == Some(true), |group| {
+                                    group.child(marker(
+                                        "system-info-virtual",
+                                        "虚拟设备",
+                                        IconName::Boxes,
+                                    ))
+                                }),
+                        )
+                }))
         };
         // There are at most nine hardware categories. Device text wraps naturally
         // inside each category instead of using measured or truncated list rows.
@@ -234,6 +348,9 @@ impl Render for SystemInfoPage {
             .into_any_element()
         };
         ui::workspace()
+            .on_action(cx.listener(|this, _: &SaveScreenshot, window, cx| {
+                this.screenshot(window, cx);
+            }))
             .child(
                 ui::workspace_header("系统信息", "", cx).child(
                     h_flex()
@@ -251,25 +368,38 @@ impl Render for SystemInfoPage {
                                 ),
                         )
                         .child(
-                            Button::new("copy-system-information")
+                            DropdownButton::new("system-information-copy-menu")
                                 .outline()
-                                .label("复制")
-                                .icon(IconName::Copy)
-                                .tooltip("复制全部系统信息")
                                 .with_size(control::STANDARD)
-                                .disabled(self.loading || self.snapshot.rows.is_empty())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        this.snapshot.copy_text(this.uptime),
-                                    ));
-                                    ui::notifications::push(
-                                        window,
-                                        component::notification::Notification::success(
-                                            "已复制系统信息",
-                                        ),
-                                        cx,
-                                    );
-                                })),
+                                .menu_accessibility_label("系统信息复制选项")
+                                .disabled(
+                                    self.loading || self.exporting || self.snapshot.rows.is_empty(),
+                                )
+                                .dropdown_menu(|menu, _, _| {
+                                    menu.menu("保存截图", Box::new(SaveScreenshot))
+                                })
+                                .button(
+                                    Button::new("copy-system-information")
+                                        .outline()
+                                        .label("复制")
+                                        .icon(IconName::Copy)
+                                        .loading(self.exporting)
+                                        .tooltip("复制全部系统信息")
+                                        .with_size(control::STANDARD)
+                                        .disabled(self.loading || self.snapshot.rows.is_empty())
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                this.snapshot.copy_text(this.uptime),
+                                            ));
+                                            ui::notifications::push(
+                                                window,
+                                                component::notification::Notification::success(
+                                                    "已复制系统信息",
+                                                ),
+                                                cx,
+                                            );
+                                        })),
+                                ),
                         ),
                 ),
             )
@@ -299,7 +429,7 @@ impl Render for SystemInfoPage {
                                     ))
                                     .child(summary(
                                         "system-summary-os",
-                                        IconName::Monitor,
+                                        IconName::SquareTerminal,
                                         "系统信息",
                                         self.snapshot.os.clone(),
                                     ))
@@ -320,14 +450,14 @@ impl Render for SystemInfoPage {
 #[cfg(test)]
 mod tests {
     use super::{SystemInfoPage, model};
-    use crate::ui::theme::preferences;
+    use crate::ui::theme::{layout, preferences};
     use gpui_kit::{
         AppContext as _, Bounds, ClipboardItem, TestAppContext, WindowBounds, WindowOptions,
         component::{Theme, ThemeMode},
         point, px, size,
-        test::TestWindowExt,
+        test::{TestEventExt, TestQueryExt, TestWindowExt},
     };
-    use model::HardwareKind;
+    use model::{HardwareDevice, HardwareKind};
     use std::sync::{Arc, atomic::AtomicBool};
 
     #[gpui_kit::test]
@@ -356,13 +486,26 @@ mod tests {
                         };
                         snapshot.add(
                             HardwareKind::Memory,
-                            vec!["Samsung 16 GiB DDR5 5200 MT/s ".repeat(8)],
+                            vec![HardwareDevice::new(
+                                "Samsung 16 GiB DDR5 5200 MT/s ".repeat(8),
+                                None,
+                            )],
                         );
                         snapshot.add(
                             HardwareKind::Monitor,
                             vec![
-                                "Lenovo [15.3″ · 1920 × 1080 · 60 Hz]".into(),
-                                "主屏 Mi Monitor [27.0″ · 2560 × 1440 · 59 Hz]".into(),
+                                HardwareDevice {
+                                    primary: true,
+                                    ..HardwareDevice::new(
+                                        "Mi Monitor [27.0″ · 2560 × 1440 · 59 Hz]".into(),
+                                        Some(true),
+                                    )
+                                },
+                                HardwareDevice::new(
+                                    "Lenovo [15.3″ · 1920 × 1080 · 60 Hz]".into(),
+                                    Some(false),
+                                ),
+                                HardwareDevice::new("第二个虚拟显示器".into(), Some(true)),
                             ],
                         );
                         snapshot.add(HardwareKind::Audio, Vec::new());
@@ -373,6 +516,8 @@ mod tests {
                             request: 0,
                             cancelled: Arc::new(AtomicBool::new(false)),
                             task: None,
+                            export_task: None,
+                            exporting: false,
                             _uptime_task: cx.background_spawn(async {}),
                             uptime: 6284,
                         }
@@ -381,7 +526,13 @@ mod tests {
             )
             .unwrap()
         });
-        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        for (mode, width) in [
+            (ThemeMode::Light, 620.),
+            (ThemeMode::Dark, 620.),
+            (ThemeMode::Light, 900.),
+            (ThemeMode::Dark, 900.),
+        ] {
+            cx.simulate_window_resize(handle, size(px(width), px(600.)));
             cx.update(|cx| Theme::change(mode, None, cx));
             cx.run_until_parked();
             cx.update_window(handle, |_, window, cx| {
@@ -400,6 +551,26 @@ mod tests {
                 assert!(values.bottom() <= memory.bottom());
                 let monitors = window.find("system-info-monitor-values").bounds();
                 assert_eq!(values.origin.x, monitors.origin.x);
+                let marker_lanes = window
+                    .within("system-info-monitor-values")
+                    .find_all("system-info-markers");
+                assert_eq!(marker_lanes.len(), 3);
+                for lane in &marker_lanes {
+                    assert_eq!(lane.bounds().right(), monitors.right());
+                    assert_eq!(
+                        lane.bounds().size.width,
+                        layout::SYSTEM_INFO_MARKERS_WIDTH.to_pixels(window.rem_size())
+                    );
+                }
+                let primary = window.find_by_label("主屏").bounds();
+                let virtual_markers = window.find_all_by_label("虚拟设备");
+                assert_eq!(virtual_markers.len(), 2);
+                assert!(primary.right() < virtual_markers[0].bounds().origin.x);
+                assert_eq!(primary.center().y, virtual_markers[0].bounds().center().y);
+                assert!(primary.origin.y > marker_lanes[0].bounds().origin.y);
+                for marker in virtual_markers {
+                    assert_eq!(marker.bounds().right(), monitors.right());
+                }
                 assert!(window.find_all("system-info-battery").is_empty());
                 window.click("copy-system-information", cx);
                 let copied = cx
@@ -411,11 +582,51 @@ mod tests {
                 assert!(copied.contains("运行时间：0天1小时44分钟44秒"));
                 assert!(copied.contains(&"Samsung 16 GiB DDR5 5200 MT/s ".repeat(8)));
                 assert!(copied.contains("Lenovo [15.3″ · 1920 × 1080 · 60 Hz]"));
-                assert!(copied.contains("主屏 Mi Monitor [27.0″ · 2560 × 1440 · 59 Hz]"));
+                assert!(
+                    copied.contains("主屏 Mi Monitor [27.0″ · 2560 × 1440 · 59 Hz]（虚拟设备）")
+                );
+                assert!(copied.find("Lenovo [").unwrap() < copied.find("主屏 Mi Monitor").unwrap());
                 assert!(copied.contains("声卡：\n  未知"));
             })
             .unwrap();
         }
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("系统信息.png");
+        for save in [false, true] {
+            cx.update_window(handle, |_, window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string("保持剪贴板内容".into()));
+                window.render_frame(cx);
+                let trigger = window.find_by_label("系统信息复制选项").bounds().center();
+                window.pointer_down(trigger, gpui_kit::MouseButton::Left, cx);
+                window.pointer_up(trigger, gpui_kit::MouseButton::Left, cx);
+                assert_eq!(window.find_all_by_role(gpui_kit::Role::Menu).len(), 1);
+                if save {
+                    window.press("down", cx);
+                    window.press("enter", cx);
+                } else {
+                    let item = window.find_by_label("保存截图").bounds().center();
+                    window.pointer_down(item, gpui_kit::MouseButton::Left, cx);
+                    window.pointer_up(item, gpui_kit::MouseButton::Left, cx);
+                }
+            })
+            .unwrap();
+            assert!(cx.did_prompt_for_new_path());
+            assert!(!output.exists());
+            cx.simulate_new_path_selection(|_| save.then(|| output.clone()));
+            cx.run_until_parked();
+            assert!(!page.read_with(cx, |page, _| page.exporting));
+            cx.update(|cx| {
+                assert_eq!(
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .as_deref(),
+                    Some("保持剪贴板内容")
+                );
+            });
+        }
+        let image = image::open(&output).unwrap();
+        assert!(image.width() >= 1200);
+        assert!(image.height() > 600);
         cx.update_window(handle, |_, window, cx| {
             page.update(cx, |page, cx| {
                 page.loading = true;

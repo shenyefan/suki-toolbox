@@ -234,18 +234,13 @@ impl Render for SettingsPage {
                 vec![
                     ui::preference_row(
                         "Suki Toolbox",
-                        format!("Windows 工具箱 · {}", env!("CARGO_PKG_VERSION")),
-                        ui::branding::logo().size(layout::ABOUT_LOGO_SIZE),
+                        "",
+                        ui::muted(env!("CARGO_PKG_VERSION"), cx),
                         cx,
                     )
                     .into_any_element(),
-                    ui::preference_row(
-                        "版权",
-                        ui::branding::COPYRIGHT,
-                        ui::muted(env!("CARGO_PKG_AUTHORS"), cx),
-                        cx,
-                    )
-                    .into_any_element(),
+                    ui::preference_row("版权", "", ui::muted("Copyright © Moenya", cx), cx)
+                        .into_any_element(),
                 ],
                 cx,
             ));
